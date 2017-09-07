@@ -26,7 +26,7 @@ begin_test "batch transfer"
 
   # This executes Git LFS from the local repo that was just cloned.
   git lfs track "*.dat" 2>&1 | tee track.log
-  grep "Tracking \*.dat" track.log
+  grep "Tracking \"\*.dat\"" track.log
 
   contents="a"
   contents_oid=$(calc_oid "$contents")
@@ -57,7 +57,7 @@ begin_test "batch transfer"
   # change to the clone's working directory
   cd ../clone
 
-  git pull 2>&1 | grep "Downloading a.dat (1 B)"
+  git pull
 
   [ "a" = "$(cat a.dat)" ]
 

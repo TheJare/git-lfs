@@ -10,14 +10,11 @@ import (
 	"strings"
 
 	"github.com/git-lfs/git-lfs/config"
+	"github.com/git-lfs/git-lfs/lfsapi"
 	"github.com/git-lfs/git-lfs/localstorage"
 	"github.com/git-lfs/git-lfs/tools"
 	"github.com/git-lfs/git-lfs/tq"
 	"github.com/rubyist/tracerx"
-)
-
-var (
-	LargeSizeThreshold = 5 * 1024 * 1024
 )
 
 // LocalMediaDir returns the root of lfs objects
@@ -67,12 +64,22 @@ func Environ(cfg *config.Configuration, manifest *tq.Manifest) []string {
 	osEnviron := os.Environ()
 	env := make([]string, 0, len(osEnviron)+7)
 
+	api, err := lfsapi.NewClient(cfg.Os, cfg.Git)
+	if err != nil {
+		// TODO(@ttaylorr): don't panic
+		panic(err.Error())
+	}
+
+	download := api.Endpoints.AccessFor(api.Endpoints.Endpoint("download", cfg.CurrentRemote).Url)
+	upload := api.Endpoints.AccessFor(api.Endpoints.Endpoint("upload", cfg.CurrentRemote).Url)
+
 	dltransfers := manifest.GetDownloadAdapterNames()
 	sort.Strings(dltransfers)
 	ultransfers := manifest.GetUploadAdapterNames()
 	sort.Strings(ultransfers)
 
 	fetchPruneConfig := cfg.FetchPruneConfig()
+	storageConfig := cfg.StorageConfig()
 
 	env = append(env,
 		fmt.Sprintf("LocalWorkingDir=%s", config.LocalWorkingDir),
@@ -81,7 +88,7 @@ func Environ(cfg *config.Configuration, manifest *tq.Manifest) []string {
 		fmt.Sprintf("LocalMediaDir=%s", LocalMediaDir()),
 		fmt.Sprintf("LocalReferenceDir=%s", config.LocalReferenceDir),
 		fmt.Sprintf("TempDir=%s", TempDir()),
-		fmt.Sprintf("ConcurrentTransfers=%d", cfg.ConcurrentTransfers()),
+		fmt.Sprintf("ConcurrentTransfers=%d", api.ConcurrentTransfers),
 		fmt.Sprintf("TusTransfers=%v", cfg.TusTransfersAllowed()),
 		fmt.Sprintf("BasicTransfersOnly=%v", cfg.BasicTransfersOnly()),
 		fmt.Sprintf("SkipDownloadErrors=%v", cfg.SkipDownloadErrors()),
@@ -92,8 +99,9 @@ func Environ(cfg *config.Configuration, manifest *tq.Manifest) []string {
 		fmt.Sprintf("PruneOffsetDays=%d", fetchPruneConfig.PruneOffsetDays),
 		fmt.Sprintf("PruneVerifyRemoteAlways=%v", fetchPruneConfig.PruneVerifyRemoteAlways),
 		fmt.Sprintf("PruneRemoteName=%s", fetchPruneConfig.PruneRemoteName),
-		fmt.Sprintf("AccessDownload=%s", cfg.Access("download")),
-		fmt.Sprintf("AccessUpload=%s", cfg.Access("upload")),
+		fmt.Sprintf("LfsStorageDir=%s", storageConfig.LfsStorageDir),
+		fmt.Sprintf("AccessDownload=%s", download),
+		fmt.Sprintf("AccessUpload=%s", upload),
 		fmt.Sprintf("DownloadTransfers=%s", strings.Join(dltransfers, ",")),
 		fmt.Sprintf("UploadTransfers=%s", strings.Join(ultransfers, ",")),
 	)
@@ -135,6 +143,11 @@ func ScanObjectsChan() <-chan localstorage.Object {
 func init() {
 	tracerx.DefaultKey = "GIT"
 	tracerx.Prefix = "trace git-lfs: "
+	if len(os.Getenv("GIT_TRACE")) < 1 {
+		if tt := os.Getenv("GIT_TRANSFER_TRACE"); len(tt) > 0 {
+			os.Setenv("GIT_TRACE", tt)
+		}
+	}
 }
 
 const (

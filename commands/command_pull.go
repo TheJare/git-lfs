@@ -52,7 +52,7 @@ func pull(remote string, filter *filepathfilter.Filter) {
 	q := newDownloadQueue(singleCheckout.manifest, remote, tq.WithProgress(meter))
 	gitscanner := lfs.NewGitScanner(func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
-			LoggedError(err, "Scanner error")
+			LoggedError(err, "Scanner error: %s", err)
 			return
 		}
 
@@ -81,8 +81,8 @@ func pull(remote string, filter *filepathfilter.Filter) {
 	wg.Add(1)
 
 	go func() {
-		for oid := range dlwatch {
-			for _, p := range pointers.All(oid) {
+		for t := range dlwatch {
+			for _, p := range pointers.All(t.Oid) {
 				singleCheckout.Run(p)
 			}
 		}
@@ -91,6 +91,8 @@ func pull(remote string, filter *filepathfilter.Filter) {
 
 	processQueue := time.Now()
 	if err := gitscanner.ScanTree(ref.Sha); err != nil {
+		singleCheckout.Close()
+
 		ExitWithError(err)
 	}
 
@@ -102,8 +104,16 @@ func pull(remote string, filter *filepathfilter.Filter) {
 
 	singleCheckout.Close()
 
+	success := true
 	for _, err := range q.Errors() {
+		success = false
 		FullError(err)
+	}
+
+	if !success {
+		c := getAPIClient()
+		e := c.Endpoints.Endpoint("download", remote)
+		Exit("error: failed to fetch some objects from '%s'", e.Url)
 	}
 }
 

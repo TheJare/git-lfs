@@ -531,3 +531,46 @@ func TestGetFilesChanges(t *testing.T) {
 	assert.Equal(t, expected1to2, changes)
 
 }
+
+func TestValidateRemoteURL(t *testing.T) {
+	assert.Nil(t, ValidateRemoteURL("https://github.com/git-lfs/git-lfs"))
+	assert.Nil(t, ValidateRemoteURL("http://github.com/git-lfs/git-lfs"))
+	assert.Nil(t, ValidateRemoteURL("git://github.com/git-lfs/git-lfs"))
+	assert.Nil(t, ValidateRemoteURL("ssh://git@github.com/git-lfs/git-lfs"))
+	assert.Nil(t, ValidateRemoteURL("ssh://git@github.com:22/git-lfs/git-lfs"))
+	assert.Nil(t, ValidateRemoteURL("git@github.com:git-lfs/git-lfs"))
+	assert.Nil(t, ValidateRemoteURL("git@server:/absolute/path.git"))
+	assert.NotNil(t, ValidateRemoteURL("ftp://git@github.com/git-lfs/git-lfs"))
+}
+
+func TestRefTypeKnownPrefixes(t *testing.T) {
+	for typ, expected := range map[RefType]struct {
+		Prefix string
+		Ok     bool
+	}{
+		RefTypeLocalBranch:  {"refs/heads", true},
+		RefTypeRemoteBranch: {"refs/remotes", true},
+		RefTypeLocalTag:     {"refs/tags", true},
+		RefTypeRemoteTag:    {"refs/remotes/tags", true},
+		RefTypeHEAD:         {"", false},
+		RefTypeOther:        {"", false},
+	} {
+		prefix, ok := typ.Prefix()
+
+		assert.Equal(t, expected.Prefix, prefix)
+		assert.Equal(t, expected.Ok, ok)
+	}
+}
+
+func TestRefTypeUnknownPrefix(t *testing.T) {
+	defer func() {
+		if err := recover(); err != nil {
+			assert.Equal(t, "git: unknown RefType -1", err)
+		} else {
+			t.Fatal("git: expected panic() from RefType.Prefix()")
+		}
+	}()
+
+	unknown := RefType(-1)
+	unknown.Prefix()
+}

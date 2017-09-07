@@ -39,6 +39,10 @@ to match paths.
   Remove the lockable flag from the paths so they are no longer read-only unless
   locked.
 
+* `--no-modify-attrs`
+  Makes matched entries stat-dirty so that Git can re-index files you wish to
+  convert to LFS. Does not modify any `.gitattributes` file(s).
+
 ## EXAMPLES
 
 * List the patterns that Git LFS is currently tracking:
@@ -47,11 +51,11 @@ to match paths.
 
 * Configure Git LFS to track GIF files:
 
-    `git lfs track '*.gif'`
+    `git lfs track "*.gif"`
 
 * Configure Git LFS to track PSD files and make them read-only unless locked:
 
-    `git lfs track --lockable '*.psd'`
+    `git lfs track --lockable "*.psd"`
 
 ## SEE ALSO
 

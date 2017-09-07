@@ -19,7 +19,7 @@ func TestVerifyWithoutAction(t *testing.T) {
 		Size: 123,
 	}
 
-	assert.Nil(t, verifyUpload(c, tr))
+	assert.Nil(t, verifyUpload(c, "origin", tr))
 }
 
 func TestVerifySuccess(t *testing.T) {
@@ -44,7 +44,7 @@ func TestVerifySuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c, err := lfsapi.NewClient(nil, lfsapi.TestEnv{
+	c, err := lfsapi.NewClient(nil, lfsapi.UniqTestEnv{
 		"lfs.transfer.maxverifies": "1",
 	})
 	require.Nil(t, err)
@@ -61,6 +61,6 @@ func TestVerifySuccess(t *testing.T) {
 		},
 	}
 
-	assert.Nil(t, verifyUpload(c, tr))
+	assert.Nil(t, verifyUpload(c, "origin", tr))
 	assert.EqualValues(t, 1, called)
 }

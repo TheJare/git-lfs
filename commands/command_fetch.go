@@ -103,7 +103,9 @@ func fetchCommand(cmd *cobra.Command, args []string) {
 	}
 
 	if !success {
-		Exit("Warning: errors occurred")
+		c := getAPIClient()
+		e := c.Endpoints.Endpoint("download", cfg.CurrentRemote)
+		Exit("error: failed to fetch some objects from '%s'", e.Url)
 	}
 }
 
@@ -299,8 +301,8 @@ func fetchAndReportToChan(allpointers []*lfs.WrappedPointer, filter *filepathfil
 				oidToPointers[pointer.Oid] = append(plist, pointer)
 			}
 
-			for oid := range dlwatch {
-				plist, ok := oidToPointers[oid]
+			for t := range dlwatch {
+				plist, ok := oidToPointers[t.Oid]
 				if !ok {
 					continue
 				}

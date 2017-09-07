@@ -13,7 +13,7 @@ import (
 
 type GitFetcher struct {
 	vmu  sync.RWMutex
-	vals map[string]string
+	vals map[string][]string
 }
 
 type GitConfig struct {
@@ -29,7 +29,8 @@ func NewGitConfig(gitconfiglines string, onlysafe bool) *GitConfig {
 }
 
 func ReadGitConfig(configs ...*GitConfig) (gf *GitFetcher, extensions map[string]Extension, uniqRemotes map[string]bool) {
-	vals := make(map[string]string)
+	vals := make(map[string][]string)
+	ignored := make([]string, 0)
 
 	extensions = make(map[string]Extension)
 	uniqRemotes = make(map[string]bool)
@@ -47,7 +48,7 @@ func ReadGitConfig(configs ...*GitConfig) (gf *GitFetcher, extensions map[string
 			key, val := strings.ToLower(pieces[0]), pieces[1]
 
 			if origKey, ok := uniqKeys[key]; ok {
-				if ShowConfigWarnings && vals[key] != val && strings.HasPrefix(key, gitConfigWarningPrefix) {
+				if ShowConfigWarnings && len(vals[key]) > 0 && vals[key][len(vals[key])-1] != val && strings.HasPrefix(key, gitConfigWarningPrefix) {
 					fmt.Fprintf(os.Stderr, "WARNING: These git config values clash:\n")
 					fmt.Fprintf(os.Stderr, "  git config %q = %q\n", origKey, vals[key])
 					fmt.Fprintf(os.Stderr, "  git config %q = %q\n", pieces[0], val)
@@ -68,11 +69,13 @@ func ReadGitConfig(configs ...*GitConfig) (gf *GitFetcher, extensions map[string
 				switch prop {
 				case "clean":
 					if gc.OnlySafeKeys {
+						ignored = append(ignored, key)
 						continue
 					}
 					ext.Clean = val
 				case "smudge":
 					if gc.OnlySafeKeys {
+						ignored = append(ignored, key)
 						continue
 					}
 					ext.Smudge = val
@@ -87,6 +90,7 @@ func ReadGitConfig(configs ...*GitConfig) (gf *GitFetcher, extensions map[string
 				extensions[name] = ext
 			} else if len(parts) > 1 && parts[0] == "remote" {
 				if gc.OnlySafeKeys && (len(parts) == 3 && parts[2] != "lfsurl") {
+					ignored = append(ignored, key)
 					continue
 				}
 
@@ -98,10 +102,18 @@ func ReadGitConfig(configs ...*GitConfig) (gf *GitFetcher, extensions map[string
 			}
 
 			if !allowed && keyIsUnsafe(key) {
+				ignored = append(ignored, key)
 				continue
 			}
 
-			vals[key] = val
+			vals[key] = append(vals[key], val)
+		}
+	}
+
+	if len(ignored) > 0 {
+		fmt.Fprintf(os.Stderr, "WARNING: These unsafe lfsconfig keys were ignored:\n\n")
+		for _, key := range ignored {
+			fmt.Fprintf(os.Stderr, "  %s\n", key)
 		}
 	}
 
@@ -119,21 +131,31 @@ func ReadGitConfig(configs ...*GitConfig) (gf *GitFetcher, extensions map[string
 //
 // Get is safe to call across multiple goroutines.
 func (g *GitFetcher) Get(key string) (val string, ok bool) {
-	g.vmu.RLock()
-	defer g.vmu.RUnlock()
+	all := g.GetAll(key)
 
-	val, ok = g.vals[strings.ToLower(key)]
-	return
+	if len(all) == 0 {
+		return "", false
+	}
+	return all[len(all)-1], true
 }
 
-func (g *GitFetcher) All() map[string]string {
-	newmap := make(map[string]string)
+func (g *GitFetcher) GetAll(key string) []string {
+	g.vmu.RLock()
+	defer g.vmu.RUnlock()
+
+	return g.vals[strings.ToLower(key)]
+}
+
+func (g *GitFetcher) All() map[string][]string {
+	newmap := make(map[string][]string)
 
 	g.vmu.RLock()
 	defer g.vmu.RUnlock()
 
-	for key, value := range g.vals {
-		newmap[key] = value
+	for key, values := range g.vals {
+		for _, value := range values {
+			newmap[key] = append(newmap[key], value)
+		}
 	}
 
 	return newmap

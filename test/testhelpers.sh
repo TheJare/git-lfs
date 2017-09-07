@@ -38,15 +38,28 @@ assert_local_object() {
   fi
 }
 
-# refute_local_object confirms that an object file is NOT stored for an oid
+# refute_local_object confirms that an object file is NOT stored for an oid.
+# If "$size" is given as the second argument, assert that the file exists _and_
+# that it does _not_ the expected size
+#
 # $ refute_local_object "some-oid"
+# $ refute_local_object "some-oid" "123"
 refute_local_object() {
   local oid="$1"
+  local size="$2"
   local cfg=`git lfs env | grep LocalMediaDir`
   local regex="LocalMediaDir=(\S+)"
   local f="${cfg:14}/${oid:0:2}/${oid:2:2}/$oid"
   if [ -e $f ]; then
-    exit 1
+    if [ -z "$size" ]; then
+      exit 1
+    fi
+
+    actual_size="$(wc -c < "$f" | awk '{ print $1 }')"
+    if [ "$size" -eq "$actual_size" ]; then
+      echo >&2 "fatal: expected object $oid not to have size: $size"
+      exit 1
+    fi
   fi
 }
 
@@ -57,6 +70,15 @@ delete_local_object() {
   local cfg=`git lfs env | grep LocalMediaDir`
   local f="${cfg:14}/${oid:0:2}/${oid:2:2}/$oid"
   rm "$f"
+}
+
+# corrupt_local_object corrupts the local storage for an oid
+# $ corrupt_local_object "some-oid"
+corrupt_local_object() {
+  local oid="$1"
+  local cfg=`git lfs env | grep LocalMediaDir`
+  local f="${cfg:14}/${oid:0:2}/${oid:2:2}/$oid"
+  cp /dev/null "$f"
 }
 
 
@@ -176,7 +198,7 @@ assert_attributes_count() {
   local attrib="$2"
   local count="$3"
 
-  pattern="\*.$fileext.*$attrib"
+  pattern="\(*.\)\?$fileext\(.*\)$attrib"
   actual=$(grep -e "$pattern" .gitattributes | wc -l)
   if [ "$(printf "%d" "$actual")" != "$count" ]; then
     echo "wrong number of $attrib entries for $fileext"
@@ -186,12 +208,34 @@ assert_attributes_count() {
   fi
 }
 
-assert_file_writable() {
+assert_file_writeable() {
   ls -l "$1" | grep -e "^-rw"
 }
 
-refute_file_writable() {
+refute_file_writeable() {
   ls -l "$1" | grep -e "^-r-"
+}
+
+git_root() {
+  git rev-parse --show-toplevel 2>/dev/null
+}
+
+dot_git_dir() {
+  echo "$(git_root)/.git"
+}
+
+assert_hooks() {
+  local git_root="$1"
+
+  if [ -z "$git_root" ]; then
+    echo >&2 "fatal: (assert_hooks) not in git repository"
+    exit 1
+  fi
+
+  [ -x "$git_root/hooks/post-checkout" ]
+  [ -x "$git_root/hooks/post-commit" ]
+  [ -x "$git_root/hooks/post-merge" ]
+  [ -x "$git_root/hooks/pre-push" ]
 }
 
 # pointer returns a string Git LFS pointer file.
@@ -280,6 +324,22 @@ clone_repo() {
   echo "$out"
 }
 
+# clone_repo_url clones a Git repository to the subdirectory $dir under $TRASHDIR.
+# setup_remote_repo() needs to be run first. Output is written to clone.log.
+clone_repo_url() {
+  cd "$TRASHDIR"
+
+  local repo="$1"
+  local dir="$2"
+  echo "clone git repository $repo to $dir"
+  out=$(git clone "$repo" "$dir" 2>&1)
+  cd "$dir"
+
+  git config credential.helper lfstest
+  echo "$out" > clone.log
+  echo "$out"
+}
+
 
 # clone_repo_ssl clones a repository from the test Git server to the subdirectory
 # $dir under $TRASHDIR, using the SSL endpoint.
@@ -337,9 +397,12 @@ clone_repo_clientcert() {
 setup_remote_repo_with_file() {
   local reponame="$1"
   local filename="$2"
+  local dirname="$(dirname "$filename")"
 
   setup_remote_repo "$reponame"
   clone_repo "$reponame" "clone_$reponame"
+
+  mkdir -p "$dirname"
 
   git lfs track "$filename"
   echo "$filename" > "$filename"

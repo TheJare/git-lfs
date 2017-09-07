@@ -73,9 +73,10 @@ func getAPIClient() *lfsapi.Client {
 }
 
 func newLockClient(remote string) *locking.Client {
+	storageConfig := config.Config.StorageConfig()
 	lockClient, err := locking.NewClient(remote, getAPIClient())
 	if err == nil {
-		err = lockClient.SetupFileCache(filepath.Join(config.LocalGitStorageDir, "lfs"))
+		err = lockClient.SetupFileCache(storageConfig.LfsStorageDir)
 	}
 
 	if err != nil {
@@ -85,6 +86,7 @@ func newLockClient(remote string) *locking.Client {
 	// Configure dirs
 	lockClient.LocalWorkingDir = config.LocalWorkingDir
 	lockClient.LocalGitDir = config.LocalGitDir
+	lockClient.SetLockableFilesReadOnly = cfg.SetLockableFilesReadOnly()
 
 	return lockClient
 }
@@ -302,7 +304,10 @@ func handlePanic(err error) string {
 }
 
 func logPanic(loggedError error) string {
-	var fmtWriter io.Writer = os.Stderr
+	var (
+		fmtWriter  io.Writer = os.Stderr
+		lineEnding string    = "\n"
+	)
 
 	now := time.Now()
 	name := now.Format("20060102T150405.999999999")
@@ -316,54 +321,52 @@ func logPanic(loggedError error) string {
 		full = ""
 		defer func() {
 			fmt.Fprintf(fmtWriter, "Unable to log panic to %s\n\n", filename)
-			logPanicToWriter(fmtWriter, err)
+			logPanicToWriter(fmtWriter, err, lineEnding)
 		}()
 	} else {
 		fmtWriter = file
+		lineEnding = gitLineEnding(cfg.Git)
 		defer file.Close()
 	}
 
-	logPanicToWriter(fmtWriter, loggedError)
+	logPanicToWriter(fmtWriter, loggedError, lineEnding)
 
 	return full
 }
 
-func logPanicToWriter(w io.Writer, loggedError error) {
+func logPanicToWriter(w io.Writer, loggedError error, le string) {
 	// log the version
 	gitV, err := git.Config.Version()
 	if err != nil {
 		gitV = "Error getting git version: " + err.Error()
 	}
 
-	fmt.Fprintln(w, config.VersionDesc)
-	fmt.Fprintln(w, gitV)
+	fmt.Fprint(w, config.VersionDesc+le)
+	fmt.Fprint(w, gitV+le)
 
 	// log the command that was run
-	fmt.Fprintln(w)
+	fmt.Fprint(w, le)
 	fmt.Fprintf(w, "$ %s", filepath.Base(os.Args[0]))
 	if len(os.Args) > 0 {
 		fmt.Fprintf(w, " %s", strings.Join(os.Args[1:], " "))
 	}
-	fmt.Fprintln(w)
+	fmt.Fprint(w, le)
 
 	// log the error message and stack trace
 	w.Write(ErrorBuffer.Bytes())
-	fmt.Fprintln(w)
+	fmt.Fprint(w, le)
 
-	fmt.Fprintf(w, "%s\n", loggedError)
-	for _, stackline := range errors.StackTrace(loggedError) {
-		fmt.Fprintln(w, stackline)
-	}
+	fmt.Fprintf(w, "%+v"+le, loggedError)
 
 	for key, val := range errors.Context(err) {
-		fmt.Fprintf(w, "%s=%v\n", key, val)
+		fmt.Fprintf(w, "%s=%v"+le, key, val)
 	}
 
-	fmt.Fprintln(w, "\nENV:")
+	fmt.Fprint(w, le+"ENV:"+le)
 
 	// log the environment
 	for _, env := range lfs.Environ(cfg, getTransferManifest()) {
-		fmt.Fprintln(w, env)
+		fmt.Fprint(w, env+le)
 	}
 }
 

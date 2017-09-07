@@ -7,8 +7,12 @@ import (
 
 	"github.com/git-lfs/git-lfs/errors"
 	"github.com/git-lfs/git-lfs/filepathfilter"
+	"github.com/git-lfs/git-lfs/git"
 	"github.com/git-lfs/git-lfs/lfs"
+	"github.com/git-lfs/git-lfs/localstorage"
 	"github.com/git-lfs/git-lfs/tools"
+	"github.com/git-lfs/git-lfs/tools/humanize"
+	"github.com/git-lfs/git-lfs/tq"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +21,67 @@ var (
 	// command specifying whether to skip the smudge process.
 	smudgeSkip = false
 )
+
+// delayedSmudge performs a 'delayed' smudge, adding the LFS pointer to the
+// `*tq.TransferQueue` "q" if the file is not present locally, passes the given
+// filepathfilter, and is not skipped. If the pointer is malformed, or already
+// exists, it streams the contents to be written into the working copy to "to".
+//
+// delayedSmudge returns the number of bytes written, whether the checkout was
+// delayed, the *lfs.Pointer that was smudged, and an error, if one occurred.
+func delayedSmudge(s *git.FilterProcessScanner, to io.Writer, from io.Reader, q *tq.TransferQueue, filename string, skip bool, filter *filepathfilter.Filter) (int64, bool, *lfs.Pointer, error) {
+	ptr, pbuf, perr := lfs.DecodeFrom(from)
+	if perr != nil {
+		// Write 'statusFromErr(nil)', even though 'perr != nil', since
+		// we are about to write non-delayed smudged contents to "to".
+		if err := s.WriteStatus(statusFromErr(nil)); err != nil {
+			return 0, false, nil, err
+		}
+
+		n, err := tools.Spool(to, pbuf, localstorage.Objects().TempDir)
+		if err != nil {
+			return n, false, nil, errors.Wrap(err, perr.Error())
+		}
+
+		if n != 0 {
+			return 0, false, nil, errors.NewNotAPointerError(errors.Errorf(
+				"Unable to parse pointer at: %q", filename,
+			))
+		}
+		return 0, false, nil, nil
+	}
+
+	lfs.LinkOrCopyFromReference(ptr.Oid, ptr.Size)
+
+	path, err := lfs.LocalMediaPath(ptr.Oid)
+	if err != nil {
+		return 0, false, nil, err
+	}
+
+	if !skip && filter.Allows(filename) {
+		if _, statErr := os.Stat(path); statErr != nil {
+			q.Add(filename, path, ptr.Oid, ptr.Size)
+			return 0, true, ptr, nil
+		}
+
+		// Write 'statusFromErr(nil)', since the object is already
+		// present in the local cache, we will write the object's
+		// contents without delaying.
+		if err := s.WriteStatus(statusFromErr(nil)); err != nil {
+			return 0, false, nil, err
+		}
+
+		n, err := ptr.Smudge(to, filename, false, nil, nil)
+		return n, false, ptr, err
+	}
+
+	if err := s.WriteStatus(statusFromErr(nil)); err != nil {
+		return 0, false, nil, err
+	}
+
+	n, err := ptr.Encode(to)
+	return int64(n), false, ptr, err
+}
 
 // smudge smudges the given `*lfs.Pointer`, "ptr", and writes its objects
 // contents to the `io.Writer`, "to".
@@ -33,26 +98,26 @@ var (
 // Any errors encountered along the way will be returned immediately if they
 // were non-fatal, otherwise execution will halt and the process will be
 // terminated by using the `commands.Panic()` func.
-func smudge(to io.Writer, from io.Reader, filename string, skip bool, filter *filepathfilter.Filter) error {
+func smudge(to io.Writer, from io.Reader, filename string, skip bool, filter *filepathfilter.Filter) (int64, error) {
 	ptr, pbuf, perr := lfs.DecodeFrom(from)
 	if perr != nil {
-		n, err := tools.Spool(to, pbuf)
+		n, err := tools.Spool(to, pbuf, localstorage.Objects().TempDir)
 		if err != nil {
-			return errors.Wrap(err, perr.Error())
+			return 0, errors.Wrap(err, perr.Error())
 		}
 
 		if n != 0 {
-			return errors.NewNotAPointerError(errors.Errorf(
+			return 0, errors.NewNotAPointerError(errors.Errorf(
 				"Unable to parse pointer at: %q", filename,
 			))
 		}
-		return nil
+		return 0, nil
 	}
 
 	lfs.LinkOrCopyFromReference(ptr.Oid, ptr.Size)
-	cb, file, err := lfs.CopyCallbackFile("smudge", filename, 1, 1)
+	cb, file, err := lfs.CopyCallbackFile("download", filename, 1, 1)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	download := !skip
@@ -60,7 +125,7 @@ func smudge(to io.Writer, from io.Reader, filename string, skip bool, filter *fi
 		download = filter.Allows(filename)
 	}
 
-	err = ptr.Smudge(to, filename, download, getTransferManifest(), cb)
+	n, err := ptr.Smudge(to, filename, download, getTransferManifest(), cb)
 	if file != nil {
 		file.Close()
 	}
@@ -69,14 +134,19 @@ func smudge(to io.Writer, from io.Reader, filename string, skip bool, filter *fi
 		ptr.Encode(to)
 		// Download declined error is ok to skip if we weren't requesting download
 		if !(errors.IsDownloadDeclinedError(err) && !download) {
-			LoggedError(err, "Error downloading object: %s (%s)", filename, ptr.Oid)
+			var oid string = ptr.Oid
+			if len(oid) >= 7 {
+				oid = oid[:7]
+			}
+
+			LoggedError(err, "Error downloading object: %s (%s): %s", filename, oid, err)
 			if !cfg.SkipDownloadErrors() {
 				os.Exit(2)
 			}
 		}
 	}
 
-	return nil
+	return n, nil
 }
 
 func smudgeCommand(cmd *cobra.Command, args []string) {
@@ -88,12 +158,14 @@ func smudgeCommand(cmd *cobra.Command, args []string) {
 	}
 	filter := filepathfilter.New(cfg.FetchIncludePaths(), cfg.FetchExcludePaths())
 
-	if err := smudge(os.Stdout, os.Stdin, smudgeFilename(args), smudgeSkip, filter); err != nil {
+	if n, err := smudge(os.Stdout, os.Stdin, smudgeFilename(args), smudgeSkip, filter); err != nil {
 		if errors.IsNotAPointerError(err) {
 			fmt.Fprintln(os.Stderr, err.Error())
 		} else {
 			Error(err.Error())
 		}
+	} else if possiblyMalformedObjectSize(n) {
+		fmt.Fprintln(os.Stderr, "Possibly malformed smudge on Windows: see `git lfs help smudge` for more info.")
 	}
 }
 
@@ -102,6 +174,10 @@ func smudgeFilename(args []string) string {
 		return args[0]
 	}
 	return "<unknown file>"
+}
+
+func possiblyMalformedObjectSize(n int64) bool {
+	return n > 4*humanize.Gigabyte
 }
 
 func init() {

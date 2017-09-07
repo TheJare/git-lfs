@@ -1,11 +1,13 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/git-lfs/git-lfs/lfs"
 	"github.com/git-lfs/git-lfs/localstorage"
 	"github.com/git-lfs/git-lfs/subprocess"
 
@@ -16,10 +18,24 @@ import (
 
 var (
 	cloneFlags git.CloneFlags
+
+	cloneSkipRepoInstall bool
 )
 
 func cloneCommand(cmd *cobra.Command, args []string) {
 	requireGitVersion()
+
+	if git.Config.IsGitVersionAtLeast("2.15.0") {
+		msg := []string{
+			"WARNING: 'git lfs clone' is deprecated and will not be updated",
+			"          with new flags from 'git clone'",
+			"",
+			"'git clone' has been updated in upstream Git to have comparable",
+			"speeds to 'git lfs clone'.",
+		}
+
+		fmt.Fprintln(os.Stderr, strings.Join(msg, "\n"))
+	}
 
 	// We pass all args to git clone
 	err := git.CloneWithoutFilters(cloneFlags, args)
@@ -82,6 +98,15 @@ func cloneCommand(cmd *cobra.Command, args []string) {
 			Exit("Error performing 'git lfs pull' for submodules: %v", err)
 		}
 	}
+
+	if !cloneSkipRepoInstall {
+		// If --skip-repo wasn't given, install repo-level hooks while
+		// we're still in the checkout directory.
+
+		if err := lfs.InstallHooks(false); err != nil {
+			ExitWithError(err)
+		}
+	}
 }
 
 func postCloneSubmodules(args []string) error {
@@ -125,6 +150,7 @@ func init() {
 		cmd.Flags().StringVarP(&cloneFlags.Branch, "branch", "b", "", "See 'git clone --help'")
 		cmd.Flags().StringVarP(&cloneFlags.Upload, "upload-pack", "u", "", "See 'git clone --help'")
 		cmd.Flags().StringVarP(&cloneFlags.Reference, "reference", "", "", "See 'git clone --help'")
+		cmd.Flags().StringVarP(&cloneFlags.ReferenceIfAble, "reference-if-able", "", "", "See 'git clone --help'")
 		cmd.Flags().BoolVarP(&cloneFlags.Dissociate, "dissociate", "", false, "See 'git clone --help'")
 		cmd.Flags().StringVarP(&cloneFlags.SeparateGit, "separate-git-dir", "", "", "See 'git clone --help'")
 		cmd.Flags().StringVarP(&cloneFlags.Depth, "depth", "", "", "See 'git clone --help'")
@@ -133,11 +159,18 @@ func init() {
 		cmd.Flags().StringVarP(&cloneFlags.Config, "config", "c", "", "See 'git clone --help'")
 		cmd.Flags().BoolVarP(&cloneFlags.SingleBranch, "single-branch", "", false, "See 'git clone --help'")
 		cmd.Flags().BoolVarP(&cloneFlags.NoSingleBranch, "no-single-branch", "", false, "See 'git clone --help'")
-		cmd.Flags().BoolVarP(&cloneFlags.Verbose, "verbose", "", false, "See 'git clone --help'")
+		cmd.Flags().BoolVarP(&cloneFlags.Verbose, "verbose", "v", false, "See 'git clone --help'")
 		cmd.Flags().BoolVarP(&cloneFlags.Ipv4, "ipv4", "", false, "See 'git clone --help'")
 		cmd.Flags().BoolVarP(&cloneFlags.Ipv6, "ipv6", "", false, "See 'git clone --help'")
+		cmd.Flags().StringVarP(&cloneFlags.ShallowSince, "shallow-since", "", "", "See 'git clone --help'")
+		cmd.Flags().StringVarP(&cloneFlags.ShallowExclude, "shallow-exclude", "", "", "See 'git clone --help'")
+		cmd.Flags().BoolVarP(&cloneFlags.ShallowSubmodules, "shallow-submodules", "", false, "See 'git clone --help'")
+		cmd.Flags().BoolVarP(&cloneFlags.NoShallowSubmodules, "no-shallow-submodules", "", false, "See 'git clone --help'")
+		cmd.Flags().Int64VarP(&cloneFlags.Jobs, "jobs", "j", -1, "See 'git clone --help'")
 
 		cmd.Flags().StringVarP(&includeArg, "include", "I", "", "Include a list of paths")
 		cmd.Flags().StringVarP(&excludeArg, "exclude", "X", "", "Exclude a list of paths")
+
+		cmd.Flags().BoolVar(&cloneSkipRepoInstall, "skip-repo", false, "Skip LFS repo setup")
 	})
 }

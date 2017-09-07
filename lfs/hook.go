@@ -11,6 +11,8 @@ import (
 	"github.com/git-lfs/git-lfs/config"
 	"github.com/git-lfs/git-lfs/errors"
 	"github.com/git-lfs/git-lfs/git"
+	"github.com/git-lfs/git-lfs/tools"
+	"github.com/rubyist/tracerx"
 )
 
 var (
@@ -38,7 +40,8 @@ func NewStandardHook(theType string, upgradeables []string) *Hook {
 
 func (h *Hook) Exists() bool {
 	_, err := os.Stat(h.Path())
-	return err == nil
+
+	return !os.IsNotExist(err)
 }
 
 // Path returns the desired (or actual, if installed) location where this hook
@@ -65,14 +68,18 @@ func (h *Hook) Dir() string {
 // directory. It returns and halts at any errors, and returns nil if the
 // operation was a success.
 func (h *Hook) Install(force bool) error {
+	msg := fmt.Sprintf("Install hook: %s, force=%t, path=%s", h.Type, force, h.Path())
+
 	if err := os.MkdirAll(h.Dir(), 0755); err != nil {
 		return err
 	}
 
 	if h.Exists() && !force {
+		tracerx.Printf(msg + ", upgrading...")
 		return h.Upgrade()
 	}
 
+	tracerx.Printf(msg)
 	return h.write()
 }
 
@@ -107,15 +114,19 @@ func (h *Hook) Uninstall() error {
 		return errors.New("Not in a git repository")
 	}
 
+	msg := fmt.Sprintf("Uninstall hook: %s, path=%s", h.Type, h.Path())
+
 	match, err := h.matchesCurrent()
 	if err != nil {
 		return err
 	}
 
 	if !match {
+		tracerx.Printf(msg + ", doesn't match...")
 		return nil
 	}
 
+	tracerx.Printf(msg)
 	return os.RemoveAll(h.Path())
 }
 
@@ -135,7 +146,7 @@ func (h *Hook) matchesCurrent() (bool, error) {
 		return false, err
 	}
 
-	contents := strings.TrimSpace(string(by))
+	contents := strings.TrimSpace(tools.Undent(string(by)))
 	if contents == h.Contents || len(contents) == 0 {
 		return true, nil
 	}
@@ -146,5 +157,5 @@ func (h *Hook) matchesCurrent() (bool, error) {
 		}
 	}
 
-	return false, fmt.Errorf("Hook already exists: %s\n\n%s\n", string(h.Type), contents)
+	return false, fmt.Errorf("Hook already exists: %s\n\n%s\n", string(h.Type), tools.Indent(contents))
 }

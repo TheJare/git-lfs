@@ -84,3 +84,56 @@ begin_test "locking a directory"
   grep "cannot lock directory" lock.log
 )
 end_test
+
+begin_test "locking a nested file"
+(
+  set -e
+
+  reponame="locking-nested-file"
+  setup_remote_repo "$reponame"
+  clone_repo "$reponame" "$reponame"
+
+  git lfs track "*.dat" --lockable
+  git add .gitattributes
+  git commit -m "initial commit"
+
+  mkdir -p foo/bar/baz
+
+  contents="contents"
+  contents_oid="$(calc_oid "$contents")"
+
+  printf "$contents" > foo/bar/baz/a.dat
+  git add foo/bar/baz/a.dat
+  git commit -m "add a.dat"
+
+  git push origin master
+
+  assert_server_object "$reponame" "$contents_oid"
+
+  git lfs lock foo/bar/baz/a.dat 2>&1 | tee lock.log
+  grep "Locked foo/bar/baz/a.dat" lock.log
+
+  git lfs locks 2>&1 | tee locks.log
+  grep "foo/bar/baz/a.dat" locks.log
+)
+end_test
+
+begin_test "creating a lock (within subdirectory)"
+(
+  set -e
+
+  reponame="lock_create_within_subdirectory"
+  setup_remote_repo_with_file "$reponame" "sub/a.dat"
+
+  cd sub
+
+  git lfs lock --json "a.dat" | tee lock.json
+  if [ "0" -ne "${PIPESTATUS[0]}" ]; then
+    echo >&2 "fatal: expected 'git lfs lock \'a.dat\'' to succeed"
+    exit 1
+  fi
+
+  id=$(assert_lock lock.json sub/a.dat)
+  assert_server_lock "$reponame" "$id"
+)
+end_test

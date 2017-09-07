@@ -40,12 +40,15 @@ func unlockCommand(cmd *cobra.Command, args []string) {
 
 	if hasPath {
 		path, err := lockPath(args[0])
-		if err != nil && !unlockCmdFlags.Force {
-			Exit("Unable to determine path: %v", err.Error())
+		if err != nil {
+			if !unlockCmdFlags.Force {
+				Exit("Unable to determine path: %v", err.Error())
+			}
+			path = args[0]
 		}
 
 		// This call can early-out
-		unlockAbortIfFileModified(path)
+		unlockAbortIfFileModified(path, !os.IsNotExist(err))
 
 		err = lockClient.UnlockFile(path, unlockCmdFlags.Force)
 		if err != nil {
@@ -81,10 +84,19 @@ func unlockCommand(cmd *cobra.Command, args []string) {
 	return
 }
 
-func unlockAbortIfFileModified(path string) {
+func unlockAbortIfFileModified(path string, exists bool) {
 	modified, err := git.IsFileModified(path)
 
 	if err != nil {
+		if !exists && unlockCmdFlags.Force {
+			// Since git/git@b9a7d55, `git-status(1)` causes an
+			// error when asked about files that don't exist,
+			// causing `err != nil`, as above.
+			//
+			// Unlocking a files that does not exist with
+			// --force is OK.
+			return
+		}
 		Exit(err.Error())
 	}
 
@@ -114,7 +126,7 @@ func unlockAbortIfFileModifiedById(id string, lockClient *locking.Client) {
 		return
 	}
 
-	unlockAbortIfFileModified(locks[0].Path)
+	unlockAbortIfFileModified(locks[0].Path, true)
 }
 
 func init() {

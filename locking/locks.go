@@ -10,6 +10,7 @@ import (
 
 	"github.com/git-lfs/git-lfs/errors"
 	"github.com/git-lfs/git-lfs/filepathfilter"
+	"github.com/git-lfs/git-lfs/git"
 	"github.com/git-lfs/git-lfs/lfsapi"
 	"github.com/git-lfs/git-lfs/tools"
 	"github.com/git-lfs/git-lfs/tools/kv"
@@ -107,12 +108,32 @@ func (c *Client) LockFile(path string) (Lock, error) {
 		return Lock{}, errors.Wrap(err, "lock cache")
 	}
 
+	abs, err := getAbsolutePath(path)
+	if err != nil {
+		return Lock{}, errors.Wrap(err, "make lockpath absolute")
+	}
+
 	// Ensure writeable on return
-	if err := tools.SetFileWriteFlag(path, true); err != nil {
+	if err := tools.SetFileWriteFlag(abs, true); err != nil {
 		return Lock{}, err
 	}
 
 	return lock, nil
+}
+
+// getAbsolutePath takes a repository-relative path and makes it absolute.
+//
+// For instance, given a repository in /usr/local/src/my-repo and a file called
+// dir/foo/bar.txt, getAbsolutePath will return:
+//
+//   /usr/local/src/my-repo/dir/foo/bar.txt
+func getAbsolutePath(p string) (string, error) {
+	root, err := git.RootDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(root, p), nil
 }
 
 // UnlockFile attempts to unlock a file on the current remote
@@ -129,9 +150,14 @@ func (c *Client) UnlockFile(path string, force bool) error {
 		return err
 	}
 
+	abs, err := getAbsolutePath(path)
+	if err != nil {
+		return errors.Wrap(err, "make lockpath absolute")
+	}
+
 	// Make non-writeable if required
 	if c.SetLockableFilesReadOnly && c.IsFileLockable(path) {
-		return tools.SetFileWriteFlag(path, false)
+		return tools.SetFileWriteFlag(abs, false)
 	}
 	return nil
 
@@ -193,8 +219,13 @@ func (c *Client) VerifiableLocks(limit int) (ourLocks, theirLocks []Lock, err er
 
 	for {
 		list, res, err := c.client.SearchVerifiable(c.Remote, body)
-		if res != nil && res.StatusCode == http.StatusNotImplemented {
-			return ourLocks, theirLocks, errors.NewNotImplementedError(err)
+		if res != nil {
+			switch res.StatusCode {
+			case http.StatusNotFound, http.StatusNotImplemented:
+				return ourLocks, theirLocks, errors.NewNotImplementedError(err)
+			case http.StatusForbidden:
+				return ourLocks, theirLocks, errors.NewAuthError(err)
+			}
 		}
 
 		if err != nil {
@@ -260,7 +291,7 @@ func (c *Client) searchRemoteLocks(filter map[string]string, limit int) ([]Lock,
 	for k, v := range filter {
 		apifilters = append(apifilters, lockFilter{Property: k, Value: v})
 	}
-	query := &lockSearchRequest{Filters: apifilters}
+	query := &lockSearchRequest{Filters: apifilters, Limit: limit}
 	for {
 		list, _, err := c.client.Search(c.Remote, query)
 		if err != nil {

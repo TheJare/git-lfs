@@ -443,7 +443,7 @@ begin_test "push ambiguous branch name"
 
 
   git lfs track "*.dat" 2>&1 | tee track.log
-  grep "Tracking \*.dat" track.log
+  grep "Tracking \"\*.dat\"" track.log
 
   NUMFILES=5
   # generate content we'll use
@@ -506,7 +506,10 @@ begin_test "push (retry with expired actions)"
   clone_repo "$reponame" "$reponame"
 
   git lfs track "*.dat"
-  printf "return-expired-action" > a.dat
+  contents="return-expired-action"
+  contents_oid="$(calc_oid "$contents")"
+  contents_size="$(printf "$contents" | wc -c | awk '{ print $1 }')"
+  printf "$contents" > a.dat
   git add .gitattributes a.dat
 
   git commit -m "add a.dat, .gitattributes" 2>&1 | tee commit.log
@@ -517,7 +520,9 @@ begin_test "push (retry with expired actions)"
 
   GIT_TRACE=1 git push origin master 2>&1 | tee push.log
 
-  [ "1" -eq "$(grep -c "enqueue retry" push.log)" ]
+  expected="enqueue retry #1 for \"$contents_oid\" (size: $contents_size): LFS: tq: action \"upload\" expires at"
+
+  grep "$expected" push.log
   grep "(1 of 1 files)" push.log
 )
 end_test
@@ -604,5 +609,49 @@ begin_test "push with deprecated _links"
   git push origin master
 
   assert_server_object "$reponame" "$contents_oid"
+)
+
+begin_test "push with missing objects (lfs.allowincompletepush)"
+(
+  set -e
+
+  reponame="push-with-missing-objects"
+  setup_remote_repo "$reponame"
+  clone_repo "$reponame" "$reponame"
+
+  git lfs track "*.dat"
+  git add .gitattributes
+  git commit -m "initial commit"
+
+  present="present"
+  present_oid="$(calc_oid "$present")"
+  printf "$present" > present.dat
+
+  missing="missing"
+  missing_oid="$(calc_oid "$missing")"
+  printf "$missing" > missing.dat
+
+  git add missing.dat present.dat
+  git commit -m "add objects"
+
+  # :fire: the "missing" object
+  missing_oid_part_1="$(echo "$missing_oid" | cut -b 1-2)"
+  missing_oid_part_2="$(echo "$missing_oid" | cut -b 3-4)"
+  missing_oid_path=".git/lfs/objects/$missing_oid_part_1/$missing_oid_part_2/$missing_oid"
+  rm "$missing_oid_path"
+
+  git config "lfs.allowincompletepush" "true"
+
+  git push origin master 2>&1 | tee push.log
+  if [ "0" -ne "${PIPESTATUS[0]}" ]; then
+    echo >&2 "fatal: expected \`git push origin master\` to succeed ..."
+    exit 1
+  fi
+
+  grep "LFS upload missing objects" push.log
+  grep "  (missing) missing.dat ($missing_oid)" push.log
+
+  assert_server_object "$reponame" "$present_oid"
+  refute_server_object "$reponame" "$missing_oid"
 )
 end_test

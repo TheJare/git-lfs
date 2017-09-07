@@ -1,14 +1,18 @@
 package lfsapi
 
 import (
+	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/git-lfs/git-lfs/config"
 	"github.com/git-lfs/git-lfs/errors"
 	"github.com/rubyist/tracerx"
 )
@@ -18,7 +22,7 @@ var UserAgent = "git-lfs"
 const MediaType = "application/vnd.git-lfs+json; charset=utf-8"
 
 func (c *Client) NewRequest(method string, e Endpoint, suffix string, body interface{}) (*http.Request, error) {
-	sshRes, err := c.resolveSSHEndpoint(e, method)
+	sshRes, err := c.SSH.Resolve(e, method)
 	if err != nil {
 		tracerx.Printf("ssh: %s failed, error: %s, message: %s",
 			e.SshUserAndHost, err.Error(), sshRes.Message,
@@ -65,6 +69,7 @@ func joinURL(prefix, suffix string) string {
 }
 
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	req.Header = c.extraHeadersFor(req)
 	req.Header.Set("User-Agent", UserAgent)
 
 	res, err := c.doWithRedirects(c.httpClient(req.Host), req, nil)
@@ -75,22 +80,66 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	return res, c.handleResponse(res)
 }
 
+// Close closes any resources that this client opened.
+func (c *Client) Close() error {
+	return c.httpLogger.Close()
+}
+
+func (c *Client) extraHeadersFor(req *http.Request) http.Header {
+	copy := make(http.Header, len(req.Header))
+	for k, vs := range req.Header {
+		copy[k] = vs
+	}
+
+	for k, vs := range c.extraHeaders(req.URL) {
+		for _, v := range vs {
+			copy[k] = append(copy[k], v)
+		}
+	}
+	return copy
+}
+
+func (c *Client) extraHeaders(u *url.URL) map[string][]string {
+	hdrs := c.uc.GetAll("http", u.String(), "extraHeader")
+	m := make(map[string][]string, len(hdrs))
+
+	for _, hdr := range hdrs {
+		parts := strings.SplitN(hdr, ":", 2)
+		if len(parts) < 2 {
+			continue
+		}
+
+		k, v := parts[0], strings.TrimSpace(parts[1])
+
+		m[k] = append(m[k], v)
+	}
+	return m
+}
+
 func (c *Client) doWithRedirects(cli *http.Client, req *http.Request, via []*http.Request) (*http.Response, error) {
-	c.traceRequest(req)
-	if err := c.prepareRequestBody(req); err != nil {
+	tracedReq, err := c.traceRequest(req)
+	if err != nil {
 		return nil, err
 	}
 
-	start := time.Now()
 	res, err := cli.Do(req)
 	if err != nil {
+		c.traceResponse(req, tracedReq, nil)
 		return res, err
 	}
 
-	c.traceResponse(res)
-	c.startResponseStats(res, start)
+	c.traceResponse(req, tracedReq, res)
 
-	if res.StatusCode != 307 {
+	if res.StatusCode != 301 &&
+		res.StatusCode != 302 &&
+		res.StatusCode != 303 &&
+		res.StatusCode != 307 &&
+		res.StatusCode != 308 {
+
+		// Above are the list of 3xx status codes that we know
+		// how to handle below. If the status code contained in
+		// the HTTP response was none of them, return the (res,
+		// err) tuple as-is, otherwise handle the redirect.
 		return res, err
 	}
 
@@ -136,7 +185,7 @@ func (c *Client) httpClient(host string) *http.Client {
 
 	concurrentTransfers := c.ConcurrentTransfers
 	if concurrentTransfers < 1 {
-		concurrentTransfers = 3
+		concurrentTransfers = 8
 	}
 
 	dialtime := c.DialTimeout
@@ -155,13 +204,41 @@ func (c *Client) httpClient(host string) *http.Client {
 	}
 
 	tr := &http.Transport{
-		Proxy: proxyFromClient(c),
-		Dial: (&net.Dialer{
-			Timeout:   time.Duration(dialtime) * time.Second,
-			KeepAlive: time.Duration(keepalivetime) * time.Second,
-		}).Dial,
+		Proxy:               proxyFromClient(c),
 		TLSHandshakeTimeout: time.Duration(tlstime) * time.Second,
 		MaxIdleConnsPerHost: concurrentTransfers,
+	}
+
+	activityTimeout := 10
+	if v, ok := c.uc.Get("lfs", fmt.Sprintf("https://%v", host), "activitytimeout"); ok {
+		if i, err := strconv.Atoi(v); err == nil {
+			activityTimeout = i
+		} else {
+			activityTimeout = 0
+		}
+	}
+
+	dialer := &net.Dialer{
+		Timeout:   time.Duration(dialtime) * time.Second,
+		KeepAlive: time.Duration(keepalivetime) * time.Second,
+		DualStack: true,
+	}
+
+	if activityTimeout > 0 {
+		activityDuration := time.Duration(activityTimeout) * time.Second
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := dialer.DialContext(ctx, network, addr)
+			if c == nil {
+				return c, err
+			}
+			if tc, ok := c.(*net.TCPConn); ok {
+				tc.SetKeepAlive(true)
+				tc.SetKeepAlivePeriod(dialer.KeepAlive)
+			}
+			return &deadlineConn{Timeout: activityDuration, Conn: c}, err
+		}
+	} else {
+		tr.DialContext = dialer.DialContext
 	}
 
 	tr.TLSClientConfig = &tls.Config{}
@@ -205,9 +282,14 @@ func newRequestForRetry(req *http.Request, location string) (*http.Request, erro
 		return nil, err
 	}
 
+	if req.URL.Scheme == "https" && newReq.URL.Scheme == "http" {
+		return nil, errors.New("lfsapi/client: refusing insecure redirect, https->http")
+	}
+
+	sameHost := req.URL.Host == newReq.URL.Host
 	for key := range req.Header {
 		if key == "Authorization" {
-			if req.URL.Scheme != newReq.URL.Scheme || req.URL.Host != newReq.URL.Host {
+			if !sameHost {
 				continue
 			}
 		}
@@ -218,7 +300,33 @@ func newRequestForRetry(req *http.Request, location string) (*http.Request, erro
 	newURL := strings.SplitN(newReq.URL.String(), "?", 2)[0]
 	tracerx.Printf("api: redirect %s %s to %s", req.Method, oldestURL, newURL)
 
+	// This body will have already been rewound from a call to
+	// lfsapi.Client.traceRequest().
 	newReq.Body = req.Body
 	newReq.ContentLength = req.ContentLength
 	return newReq, nil
+}
+
+type deadlineConn struct {
+	Timeout time.Duration
+	net.Conn
+}
+
+func (c *deadlineConn) Read(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.Timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *deadlineConn) Write(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.Timeout)); err != nil {
+		return 0, err
+	}
+
+	return c.Conn.Write(b)
+}
+
+func init() {
+	UserAgent = config.VersionDesc
 }

@@ -47,7 +47,7 @@ func fsckCommand(cmd *cobra.Command, args []string) {
 		}
 	})
 
-	if err := gitscanner.ScanRefWithDeleted(ref.Sha, nil); err != nil {
+	if err := gitscanner.ScanRef(ref.Sha, nil); err != nil {
 		ExitWithError(err)
 	}
 
@@ -66,7 +66,8 @@ func fsckCommand(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	badDir := filepath.Join(config.LocalGitStorageDir, "lfs", "bad")
+	storageConfig := config.Config.StorageConfig()
+	badDir := filepath.Join(storageConfig.LfsStorageDir, "bad")
 	Print("Moving corrupt objects to %s", badDir)
 
 	if err := os.MkdirAll(badDir, 0755); err != nil {
